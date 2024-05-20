@@ -1,0 +1,311 @@
+merc = read.csv("mercury_data.csv")
+head(merc)
+merc$delta_depth_by_diameter = merc$depth_m/merc$diameter_m
+
+library(sf)
+options(rgl.useNULL = TRUE)  # For Macbook
+library(rgl)
+library(Directional)
+library(circular)
+library(CircStats)
+library(tidyverse)
+library(Matrix)
+library(mixtools)
+library(ggplot2)
+library(skmeans)
+library(hrbrthemes)  # hrbrmstr themes
+library(magick)      # For animation
+library(mapproj)     # Needed for projection
+#theme_set(theme_ipsum())
+#library(NPCirc)
+library(rgl)
+library(colorspace)
+library(mclust)
+library(maps)
+library(movMF)
+library(maptools)
+#  Meteor lalnding(1) dataset 
+
+library(readr)
+
+lat_lon_to_xyz <- function(lat, lon, radius = 1) {
+  lat_rad <- lat * pi / 180  # Convert latitude to radians
+  lon_rad <- lon * pi / 180  # Convert longitude to radians
+  
+  x <- radius * cos(lat_rad) * cos(lon_rad)
+  y <- radius * cos(lat_rad) * sin(lon_rad)
+  z <- radius * sin(lat_rad)
+  
+  return(cbind(x, y, z))
+}
+
+vmf_density_grid = 
+  function(u, ngrid = 100) {
+    # Translate to (0,180) and (0,360)
+    u[,1] <- u[,1] + 90
+    u[,2] <- u[,2] + 180
+    res <- vmf.kerncontour(u, thumb = "none", den.ret = T, full = T,
+                           ngrid = ngrid)
+    
+    # Translate back to (-90, 90) and (-180, 180) and create a grid of
+    # coordinates
+    ret <- expand.grid(Lat = res$lat - 90, Long = res$long - 180)
+    ret$Density <- c(res$den)
+    ret
+  }
+
+library(movMF)
+
+fire_merc = cbind(merc$lat , merc$lon)
+
+set.seed(2022)
+EvMFs <- 
+  function(K){
+    movMF(fire_merc, k = K, control= list(nruns = 20))
+  }
+
+Esd = lapply(1:10, EvMFs)
+gt = sapply(Esd, BIC)
+gt
+Esd
+
+
+
+
+day_time_lst <- 12 # Local Solar Time during the day (noon)
+night_time_lst <- 0 # Local Solar Time during the night (midnight)
+
+# Define Mercury's specific constants
+solar_constant <- 1367         # Solar constant at Mercury (W/m^2)
+axial_tilt <- 0.034            # Axial tilt of Mercury in degrees
+orbital_eccentricity <- 0.2056 # Orbital eccentricity of Mercury
+
+# Helper function to calculate declination angle
+declination_angle <- function(day_of_year) {
+  return(7.25 * sin(360 * (day_of_year - 79.5) / 87.97)) # Example approximation
+}
+
+# Helper function to calculate hour angle
+hour_angle <- function(lst) {
+  return(15 * (lst - 12)) # In degrees
+}
+
+# Function to calculate solar elevation angle
+solar_elevation_angle <- function(lat, lon, lst, day_of_year) {
+  delta <- declination_angle(day_of_year)
+  H <- hour_angle(lst)
+  
+  # Convert to radians for trigonometric functions
+  lat <- lat * pi / 180
+  delta <- delta * pi / 180
+  H <- H * pi / 180
+  
+  # Calculate the solar elevation angle in radians
+  sin_alpha <- sin(lat) * sin(delta) + cos(lat) * cos(delta) * cos(H)
+  alpha <- asin(sin_alpha)
+  
+  # Convert back to degrees
+  alpha <- alpha * 180 / 180
+  
+  return(alpha)
+}
+
+# Example calculation
+day_of_year <- 100 # Example day of the Mercurian year
+
+# Daytime solar elevation angle
+merc$day_time_solar_elevation <- solar_elevation_angle(merc$lat, merc$lon, day_time_lst, day_of_year)
+# Nighttime solar elevation angle
+merc$night_time_solar_elevation <- solar_elevation_angle(merc$lat, merc$lon, night_time_lst, day_of_year)
+
+head(merc)
+
+sphericalCraterTemperature <- function(solarConstant = 1367, 
+                                       depthToDiameter, 
+                                       albedo = 0.08, 
+                                       epsilon = 0.95,  
+                                       solarElevationAngle) {
+  # This function calculates the permanent shadow temperature of a spherical crater
+  # according to a model by Ingersoll et al., 1992.
+  
+  # Ensure solarElevationAngle is not negative
+  solarElevationAngle[solarElevationAngle < 0] <- 0
+  
+  # Calculate the parameter f
+  f <- 1 / (1 + (1 / depthToDiameter)^2 / 4)
+  
+  # Calculate solar flux
+  solarFlux <- (solarConstant * sin(solarElevationAngle * pi / 180) * f * (1 - albedo) / (1 - albedo * f)) * 
+    (1 + albedo * (1 - f) / epsilon)
+  
+  # Calculate temperature
+  T <- (solarFlux / 5.67e-8)^(1/4)
+  
+  return(T)
+}
+
+
+merc$T_night <- sphericalCraterTemperature(1367, merc$delta_depth_by_diameter, 0.136, 0.95, merc$night_time_solar_elevation)
+merc$T_day <- sphericalCraterTemperature(1367, merc$delta_depth_by_diameter, 0.136, 0.95, merc$day_time_solar_elevation)
+
+head(merc)
+summary(merc)
+
+merc = na.omit(merc)
+dim(merc)
+
+crat.dens <- subset(crat.densities,  Lat> 75 & T < 90)
+landing_opt_temp <- subset(merc, T > 0 & T < 60)
+summary(landing_opt_temp)
+
+library(CircStats)
+library(circular)
+watson.test(merc$lat, alpha = 0.01, dist = "vonmises")
+watson.test(merc$lon, alpha = 0.01, dist = "vonmises")
+watson.test(merc$day_time_solar_elevation, alpha = 0.01, dist = "vonmises")
+watson.test(merc$night_time_solar_elevation, alpha = 0.01, dist = "vonmises")
+
+
+crat.densities <- vmf_density_grid(fire_merc)
+
+crat.densities
+dim(dens_data)
+
+
+m.craters <- ggplot(merc, aes(x = lon, 
+                               y = lat)) +
+  geom_point(data = merc,
+             mapping = aes(x = lon, 
+                           y = lat),
+             color = "red", alpha = .3, size = 0.1, stroke = 0.1) +
+  geom_point(data = merc,
+             mapping = aes(x = lon, 
+                           y = lat),
+             color = "black", alpha = .3, size = 2, stroke = 0.1) +
+  geom_density_2d(data = merc,
+                  aes(x = lon, 
+                      y = lat),
+                  color = "red", alpha = 1.5) +
+  geom_contour(data = crat.dens, aes(x=Long, y=Lat, z=Density),
+               color = "blue") 
+
+m.craters
+summary(crat.dens)
+summary(merc)
+
+
+crat.dens_final <- subset(crat.dens, Density > 0 & Density < 50)
+temp_day_dataset = subset(merc, T_day > 0 & T_day < 30)
+summary(temp_day_dataset)
+temp_night_dataset = subset(merc, T_night >= 0 & T_night < 0.01)
+summary(temp_night_dataset)
+
+dim(temp_day_dataset)
+
+dim(temp_night_dataset)
+
+m.craters <- ggplot() +
+  geom_point(data = merc,
+             mapping = aes(x = lon, 
+                           y = lat),
+             color = "black", alpha = .3, size = 2, stroke = 0.1) +
+  geom_point(data = temp_day_dataset,
+             mapping = aes(x = lon, 
+                           y = lat),
+             color = "orange", alpha = 1, size = 3, stroke = 0.1) +
+  geom_point(data = temp_night_dataset,
+             mapping = aes(x = lon, 
+                           y = lat),
+             color = "purple", alpha = 1, size = 2, stroke = 0.1) +
+  geom_density_2d(data = merc,
+                  aes(x = lon, 
+                      y = lat),
+                  color = "red", alpha = 1.5) +
+  geom_contour(data = crat.dens, aes(x=Long, y=Lat, z=Density),
+               color = "blue") 
+m.craters
+
+library(sp)
+library(geosphere)
+
+
+# Convert datasets to spatial objects
+coordinates(temp_day_dataset) <- ~lon + lat
+coordinates(crat.dens_final) <- ~Long + Lat
+
+# Find the nearest points using geosphere::distGeo
+nearest_points <- apply(coordinates(crat.dens_final), 1, function(point) {
+  distances <- distGeo(matrix(point, ncol=2), coordinates(temp_day_dataset))
+  nearest_index <- which.min(distances)
+  return(nearest_index)
+})
+
+# Output the nearest points
+nearest_points_df_day <- temp_day_dataset[nearest_points, ]
+head(nearest_points_df_day)
+dim(nearest_points_df_day)
+
+
+
+
+# Convert datasets to spatial objects
+coordinates(temp_night_dataset) <- ~lon + lat
+
+# Find the nearest points using geosphere::distGeo
+nearest_points <- apply(coordinates(crat.dens_final), 1, function(point) {
+  distances <- distGeo(matrix(point, ncol=2), coordinates(temp_night_dataset))
+  nearest_index <- which.min(distances)
+  return(nearest_index)
+})
+
+# Output the nearest points
+nearest_points_df_night <- temp_night_dataset[nearest_points, ]
+head(nearest_points_df_night)
+dim(nearest_points_df_night)
+
+nearest_points_df_day = data.frame(nearest_points_df_day)
+head(nearest_points_df_day)
+nearest_points_df_night = data.frame(nearest_points_df_night)
+head(nearest_points_df_night)
+
+summary(nearest_points_df_day)
+
+nearest_points_df_day_diam = subset(nearest_points_df_day, diameter_m > 5000)
+dim(nearest_points_df_day_diam)
+
+nearest_points_df_night_diam = subset(nearest_points_df_night, diameter_m > 5000)
+dim(nearest_points_df_night_diam)
+
+library(png)
+
+# Read Mars map image
+merc_map <- readPNG("PIA17386.png")
+dim(merc_map)
+# Define Mars map dimensions
+merc_width <- dim(merc_map)[2]
+merc_height <- dim(merc_map)[1]
+
+merc_map1 = data.frame(merc_map)
+merc_map1
+
+merc_height*1.6
+merc_width
+# Create ggplot object with Mars map background
+gg <- ggplot() +
+  annotation_raster(merc_map, xmin=-180, xmax=180, ymin=-90, ymax=90) +
+  coord_fixed(ratio = merc_height*1.6*4/merc_width*4)
+
+gg
+
+gg_ff <- gg+
+  geom_point(data = nearest_points_df_night_diam,
+             mapping = aes(x = lon, 
+                           y = lat),
+             color = "black", fill = "green",shape = 21, alpha = 1, size = 0.0004*nearest_points_df_night_diam$diameter_m, stroke = 0.1)+
+  geom_point(data = nearest_points_df_day_diam,
+                                                mapping = aes(x = lon,   y = lat),
+         color = "black", fill = "red",shape = 21, alpha = 1, 
+         size =  0.0004*nearest_points_df_day_diam$diameter_m, stroke = 0.1)+
+  coord_cartesian(xlim = c(-180, 180), ylim = c(-90, 90))
+
+gg_ff
